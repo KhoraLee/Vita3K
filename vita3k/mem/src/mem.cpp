@@ -283,7 +283,7 @@ bool handle_access_violation(MemState &state, uint8_t *addr, bool write) noexcep
     auto it = state.protect_tree.lower_bound(vaddr);
     if (it == state.protect_tree.end()) {
         // HACK: keep going
-        unprotect_inner(state, vaddr, 4);
+        unprotect_inner(state, vaddr, state.page_size);
         LOG_CRITICAL("Unhandled write protected region was valid. Address=0x{:X}", vaddr);
         return true;
     }
@@ -291,7 +291,7 @@ bool handle_access_violation(MemState &state, uint8_t *addr, bool write) noexcep
     ProtectSegmentInfo &info = it->second;
     if (vaddr < it->first || vaddr >= it->first + info.size) {
         // HACK: keep going
-        unprotect_inner(state, vaddr, 4);
+        unprotect_inner(state, vaddr, state.page_size);
         LOG_CRITICAL("Unhandled write protected region was valid. Address=0x{:X}", vaddr);
         return true;
     }
@@ -339,7 +339,7 @@ bool add_protect(MemState &state, Address addr, const uint32_t size, const MemPe
     align_to_page(state, addr, protect.size);
 
     ProtectBlockInfo block;
-    block.size = size;
+    block.size = protect.size;
     block.callback = callback;
 
     protect.blocks.emplace(addr, std::move(block));
@@ -502,7 +502,20 @@ Address alloc_at(MemState &state, Address address, uint32_t size, const char *na
     const uint32_t wanted_page = address / state.page_size;
     size += address % state.page_size;
     const uint32_t page_count = align(size, state.page_size) / state.page_size;
+#ifdef __aarch64__
+    if (state.page_size == KiB(4)) {
+        alloc_inner(state, wanted_page, page_count, name, true);
+    } else {
+        const uint32_t remainder = state.allocator.free_slot_count(wanted_page, wanted_page + page_count);
+        assert(page_count - remainder <= 1);
+        if (remainder == page_count)
+            alloc_inner(state, wanted_page, page_count, name, true);
+        else if (remainder != 0)
+            alloc_inner(state, wanted_page + page_count - remainder, remainder, name, true);
+    }
+#else
     alloc_inner(state, wanted_page, page_count, name, true);
+#endif
     return address;
 }
 
