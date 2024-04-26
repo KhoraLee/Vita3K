@@ -118,7 +118,7 @@ IMGUI_API void ImGui_ImplSdl_NewFrame(ImGui_State *state) {
     // Setup display size (every frame to accommodate for window resizing)
     int w, h;
     int display_w, display_h;
-    SDL_GetWindowSize(state->window, &w, &h);
+    SDL_GetWindowSizeInPixels(state->window, &w, &h);
     ImGui_ImplSdl_GetDrawableSize(state, display_w, display_h);
     io.DisplaySize = ImVec2((float)w, (float)h);
     io.DisplayFramebufferScale = ImVec2(w > 0 ? ((float)display_w / w) : 0, h > 0 ? ((float)display_h / h) : 0);
@@ -132,6 +132,14 @@ IMGUI_API void ImGui_ImplSdl_NewFrame(ImGui_State *state) {
     // Setup mouse inputs (we already got mouse wheel, keyboard keys & characters from our event handler)
     int mx, my;
     Uint32 mouse_buttons = SDL_GetMouseState(&mx, &my);
+    {
+        int size_w, size_h;
+        SDL_GetWindowSize(state->window, &size_w, &size_h);
+        LOG_INFO("SDL_GetWindowSize: {} x {}", size_w, size_h);
+        LOG_INFO("SDL_GetWindowSizeInPixels: {} x {}", w, h);
+        LOG_INFO("ImGui_ImplSdl_GetDrawableSize: {} x {}", display_w, display_h);
+        LOG_INFO("SDL_GetMouseState: {} x {}", mx, my);
+    }
     io.MousePos = ImVec2(-FLT_MAX, -FLT_MAX);
     io.MouseDown[0] = state->mouse_pressed[0] || (mouse_buttons & SDL_BUTTON(SDL_BUTTON_LEFT)) != 0; // If a mouse press event came, always pass it as "mouse held this frame", so we don't miss click-release events that are shorter than 1 frame.
     io.MouseDown[1] = state->mouse_pressed[1] || (mouse_buttons & SDL_BUTTON(SDL_BUTTON_RIGHT)) != 0;
