@@ -314,12 +314,13 @@ bool init(EmuEnvState &state, Config &cfg, const Root &root_paths) {
     if (!isSteamDeck()) {
         float ddpi, hdpi, vdpi;
         SDL_GetDisplayDPI(0, &ddpi, &hdpi, &vdpi);
-//        window_type |= SDL_WINDOW_ALLOW_HIGHDPI;
+        window_type |= SDL_WINDOW_ALLOW_HIGHDPI;
         state.dpi_scale = ddpi / 96;
+        LOG_INFO("SDL_GetDisplayDPI: {}, {}, {}", ddpi, hdpi, vdpi);
     }
     state.res_width_dpi_scale = static_cast<uint32_t>(DEFAULT_RES_WIDTH * state.dpi_scale);
     state.res_height_dpi_scale = static_cast<uint32_t>(DEFAULT_RES_HEIGHT * state.dpi_scale);
-    state.window = WindowPtr(SDL_CreateWindow(window_title, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, state.res_width_dpi_scale, state.res_height_dpi_scale, window_type | SDL_WINDOW_RESIZABLE), SDL_DestroyWindow);
+    state.window = WindowPtr(SDL_CreateWindow(window_title, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, DEFAULT_RES_WIDTH, DEFAULT_RES_HEIGHT, window_type | SDL_WINDOW_RESIZABLE), SDL_DestroyWindow);
 #elif defined(__APPLE__)
     window_type |= SDL_WINDOW_ALLOW_HIGHDPI;
     state.window = WindowPtr(SDL_CreateWindow(window_title, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, DEFAULT_RES_WIDTH, DEFAULT_RES_HEIGHT, window_type | SDL_WINDOW_RESIZABLE), SDL_DestroyWindow);
