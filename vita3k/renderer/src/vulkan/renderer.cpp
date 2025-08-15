@@ -201,6 +201,16 @@ bool VKState::create(SDL_Window *window, std::unique_ptr<renderer::State> &state
             instance_extensions.push_back(instance_extensions_str[i]);
         }
 
+#ifdef __APPLE__
+        // VK_KHR_portability_enumeration is a Vulkan Loader extension automatically added by SDL_Vulkan_GetInstanceExtensions.
+        // When using MoltenVK directly without the Vulkan Loader, this extension causes an instant crash on startup.
+        // Remove it from the default instance_extensions and handle it separately in the optional extensions.
+        auto ite = std::find(instance_extensions.begin(), instance_extensions.end(), vk::KHRPortabilityEnumerationExtensionName);
+        if (ite != instance_extensions.end()) {
+            instance_extensions.erase(ite);
+        }
+#endif
+
         const std::set<std::string> optional_instance_extensions = {
             vk::KHRGetPhysicalDeviceProperties2ExtensionName,
             vk::KHRExternalMemoryCapabilitiesExtensionName,
