@@ -102,6 +102,7 @@ jobs:
         
       - name : Print SDK
         run : |
+          sudo xcode-select --switch /Applications/Xcode_16.2.app
           xcrun --show-sdk-path
           xcrun --show-sdk-version
 
