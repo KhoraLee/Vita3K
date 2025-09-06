@@ -99,6 +99,11 @@ jobs:
 
       - name: Ccache setup
         run: ccache -z
+        
+      - name : Print SDK
+        run : |
+          xcrun --show-sdk-path
+          xcrun --show-sdk-version
 
       - name: CMake
         run: |
