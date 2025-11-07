@@ -28,6 +28,7 @@
 
 #include <util/log.h>
 #include <util/safe_time.h>
+#include <util/string_utils.h>
 
 #include <SDL3/SDL_cpuinfo.h>
 #include <SDL3/SDL_misc.h>
@@ -38,7 +39,285 @@
 #include <pugixml.hpp>
 #include <regex>
 
+#ifdef _WIN32
+#include <shlobj.h>
+#include <shobjidl.h>
+
+#include <stb_image.h>
+
+static bool png_to_ico(const fs::path &png, const fs::path &ico) {
+    int w, h, n;
+    unsigned char *data = stbi_load(png.string().c_str(), &w, &h, &n, 4);
+    if (!data) {
+        LOG_ERROR("Failed to load PNG '{}'", png.string());
+        return false;
+    }
+
+    fs::ofstream i(ico, std::ios::binary);
+    if (!i.good()) {
+        stbi_image_free(data);
+        return false;
+    }
+
+    const uint16_t reserved = 0, type = 1, count = 1;
+    const uint8_t width = (w >= 256) ? 0 : w;
+    const uint8_t height = (h >= 256) ? 0 : h;
+    const uint8_t colors = 0, reserved2 = 0;
+    const uint16_t planes = 1, bpp = 32;
+    const uint32_t imageOffset = 6 + 16;
+    const uint32_t imageSize = 40 + (w * h * 4) + (((w + 31) / 32) * 4 * h);
+
+    // ICO header
+    i.write((char *)&reserved, 2);
+    i.write((char *)&type, 2);
+    i.write((char *)&count, 2);
+    i.put(width);
+    i.put(height);
+    i.put(colors);
+    i.put(reserved2);
+    i.write((char *)&planes, 2);
+    i.write((char *)&bpp, 2);
+    i.write((char *)&imageSize, 4);
+    i.write((char *)&imageOffset, 4);
+
+    // BITMAPINFOHEADER
+    const uint32_t headerSize = 40;
+    const int32_t w32 = w, h32 = h * 2;
+    const uint16_t planes2 = 1, bitcount = 32;
+    const uint32_t compression = 0, imgSize = w * h * 4;
+    const uint32_t zero = 0;
+
+    i.write((char *)&headerSize, 4);
+    i.write((char *)&w32, 4);
+    i.write((char *)&h32, 4);
+    i.write((char *)&planes2, 2);
+    i.write((char *)&bitcount, 2);
+    i.write((char *)&compression, 4);
+    i.write((char *)&imgSize, 4);
+    i.write((char *)&zero, 4);
+    i.write((char *)&zero, 4);
+    i.write((char *)&zero, 4);
+    i.write((char *)&zero, 4);
+
+    // Pixel data (bottom-up, BGRA)
+    for (int y = h - 1; y >= 0; --y) {
+        for (int x = 0; x < w; ++x) {
+            const uint8_t *px = &data[(y * w + x) * 4];
+            const uint8_t bgra[4] = { px[2], px[1], px[0], px[3] };
+            i.write((char *)bgra, 4);
+        }
+    }
+
+    // AND mask
+    const size_t andSize = (static_cast<size_t>(w + 31) / 32) * 4 * static_cast<size_t>(h);
+    const std::vector<uint8_t> zeros(andSize, 0);
+    i.write((char *)zeros.data(), zeros.size());
+
+    stbi_image_free(data);
+    return true;
+}
+#elif defined(__APPLE__)
+#include <mach-o/dyld.h>
+#elif defined(ANDROID)
+#include <jni.h>
+#endif
+
+static fs::path get_exe_path() {
+    static fs::path cached;
+    if (!cached.empty())
+        return cached;
+
+#ifdef _WIN32
+    wchar_t exe_path[MAX_PATH];
+    if (GetModuleFileNameW(NULL, exe_path, MAX_PATH))
+        cached = exe_path;
+    else {
+        LOG_ERROR("Failed to get executable path");
+        return fs::path();
+    }
+
+#elif defined(__APPLE__)
+    char exe_path[PATH_MAX];
+    uint32_t size = sizeof(exe_path);
+
+    if (_NSGetExecutablePath(exe_path, &size) != 0) {
+        LOG_ERROR("Failed to get executable path");
+        return fs::path();
+    }
+
+    // Resolving the path (important)
+    char resolved[PATH_MAX];
+    if (realpath(exe_path, resolved) != nullptr)
+        cached = resolved;
+    else
+        cached = exe_path; // fallback
+#else // Linux / Others
+    char exe_path[PATH_MAX];
+    ssize_t len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
+    if (len != -1) {
+        exe_path[len] = '\0';
+        cached = exe_path;
+    } else {
+        LOG_ERROR("Failed to get executable path");
+        return fs::path();
+    }
+#endif
+
+    return cached;
+}
+
 namespace gui {
+
+static void create_app_icon(const fs::path &app_root) {
+    const std::string title_id = app_root.stem().string();
+    const fs::path png = app_root / "sce_sys" / "icon0.png";
+
+    if (!fs::exists(png))
+        return; // skip, will use exe icon
+
+    const auto exe_dir = get_exe_path().parent_path();
+    const fs::path icon_dir = exe_dir / "cache" / "icons";
+    fs::create_directories(icon_dir);
+
+#ifdef _WIN32
+    const fs::path ico = icon_dir / (title_id + ".ico");
+    if (!png_to_ico(png, ico))
+#elif defined(__linux__)
+    const fs::path png_dest = icon_dir / (title_id + ".png");
+    if (!fs::copy_file(png, png_dest, fs::copy_options::overwrite_existing))
+#endif
+        LOG_ERROR("Failed to create icon for app '{}", title_id);
+}
+
+static void create_shortcut(const std::string &app_path, const std::string &app_name) {
+    const fs::path exe_path = get_exe_path();
+    const fs::path exe_dir = exe_path.parent_path();
+    const fs::path icons_dir = exe_dir / "cache" / "icons";
+#ifdef _WIN32
+    // Initialize COM library
+    HRESULT hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+    if (FAILED(hr) && hr != S_FALSE && hr != RPC_E_CHANGED_MODE) {
+        LOG_ERROR("COM initialization failed: {:#X}", hr);
+        return;
+    }
+
+    // Create IShellLink instance
+    IShellLinkW *psl = nullptr;
+    hr = CoCreateInstance(CLSID_ShellLink, NULL, CLSCTX_INPROC_SERVER,
+        IID_IShellLinkW, (void **)&psl);
+    if (FAILED(hr) || !psl) {
+        LOG_ERROR("Failed to create IShellLink instance: {:#X}", hr);
+        if (hr != S_FALSE)
+            CoUninitialize();
+        return;
+    }
+
+    // Set executable path, arguments and working directory
+    psl->SetPath(exe_path.wstring().c_str());
+    const std::wstring args = L"-r " + std::wstring(app_path.begin(), app_path.end());
+    psl->SetArguments(args.c_str());
+    psl->SetWorkingDirectory(exe_dir.wstring().c_str());
+
+    // Set icon location
+    const fs::path ico = icons_dir / (fs::path(app_path).stem().string() + ".ico");
+    if (fs::exists(ico))
+        psl->SetIconLocation(ico.wstring().c_str(), 0);
+    else
+        psl->SetIconLocation(exe_path.wstring().c_str(), 0);
+
+    // Get desktop folder path
+    wchar_t desktop[MAX_PATH];
+    hr = SHGetFolderPathW(NULL, CSIDL_DESKTOPDIRECTORY, NULL, 0, desktop);
+    if (FAILED(hr)) {
+        LOG_ERROR("Failed to get desktop path: {:#X}", hr);
+        psl->Release();
+        if (hr != S_FALSE)
+            CoUninitialize();
+        return;
+    }
+    const fs::path shortcut = fs::path(desktop) / (app_name + ".lnk");
+
+    // Get IPersistFile interface to save shortcut
+    IPersistFile *ppf = nullptr;
+    hr = psl->QueryInterface(IID_IPersistFile, (void **)&ppf);
+    if (FAILED(hr) || !ppf) {
+        LOG_ERROR("QueryInterface for IPersistFile failed: {:#X}", hr);
+        psl->Release();
+        if (hr != S_FALSE)
+            CoUninitialize();
+        return;
+    }
+
+    // Save the shortcut file
+    hr = ppf->Save(shortcut.wstring().c_str(), TRUE);
+    if (FAILED(hr))
+        LOG_ERROR("Failed to save shortcut '{}': {:#X}", shortcut.string(), hr);
+    else
+        LOG_INFO("Shortcut created successfully at '{}'", shortcut.string());
+
+    // Release interfaces and uninitialize COM if needed
+    ppf->Release();
+    psl->Release();
+    if (hr != S_FALSE)
+        CoUninitialize();
+#elif defined(__APPLE__)
+    // TODO: macOS shortcut creation
+#elif defined(__linux__)
+    // Linux: create a .desktop file on desktop
+    const fs::path desktop = fs::path(getenv("HOME")) / "Desktop";
+    fs::create_directories(desktop);
+    const fs::path shortcut = desktop / (app_name + ".desktop");
+
+    fs::ofstream f(shortcut);
+    if (!f.is_open()) {
+        LOG_ERROR("Failed to create shortcut '{}'", shortcut.string());
+        return;
+    }
+
+    const fs::path png_path = icons_dir / (fs::path(app_path).stem().string() + ".png");
+
+    f << "[Desktop Entry]\n"
+         "Type=Application\n"
+         "Name="
+      << app_name << "\n"
+                     "Exec="
+      << exe_path.string() << " -r " << app_path << "\n"
+                                                    "Icon="
+      << (fs::exists(png_path) ? png_path.string() : exe_path.string()) << "\n"
+                                                                           "Categories=Game;Emulator;X-None;\n";
+
+    f.close();
+    fs::permissions(shortcut, fs::perms::owner_exe | fs::perms::owner_read | fs::perms::owner_write);
+    LOG_INFO("Linux shortcut created successfully at '{}'", shortcut.string());
+#elif defined(ANDROID)
+    // retrieve the JNI environment.
+    JNIEnv *env = reinterpret_cast<JNIEnv *>(SDL_AndroidGetJNIEnv());
+
+    // retrieve the Java instance of the SDLActivity
+    jobject activity = reinterpret_cast<jobject>(SDL_AndroidGetActivity());
+
+    // find the Java class of the activity. It should be SDLActivity or a subclass of it.
+    jclass clazz(env->GetObjectClass(activity));
+
+    // find the identifier of the method to call
+    jmethodID method_id = env->GetMethodID(clazz, "createShortcut", "(Ljava/lang/String;Ljava/lang/String;)Z");
+    jstring j_app_path = env->NewStringUTF(app_path.data());
+    jstring j_app_name = env->NewStringUTF(app_name.data());
+
+    jboolean result = env->CallBooleanMethod(activity, method_id, j_app_path, j_app_name);
+
+    // clean up the local references.
+    env->DeleteLocalRef(j_app_name);
+    env->DeleteLocalRef(j_app_path);
+    env->DeleteLocalRef(activity);
+    env->DeleteLocalRef(clazz);
+
+    if (result)
+        SDL_AndroidShowToast("Shortcut successfully created!", 0, -1, 0, 0);
+    else
+        SDL_AndroidShowToast("Failed to create shortcut.", 1, -1, 0, 0);
+#endif
+}
 
 static std::map<double, std::string> update_history_infos;
 
@@ -435,6 +714,16 @@ void draw_app_context_menu(GuiState &gui, EmuEnvState &emuenv, const std::string
                 }
                 ImGui::EndMenu();
             }
+            if (ImGui::MenuItem("Create Shortcut")) {
+#if defined(_WIN32) || defined(__linux__)
+                const auto app_root_path = emuenv.pref_path / "ux0/app" / app_path;
+                create_app_icon(app_root_path);
+#endif
+
+#ifndef __APPLE__
+                create_shortcut(app_path, string_utils::remove_special_chars(APP_INDEX->title));
+#endif
+            }
             if (ImGui::BeginMenu(lang.main["custom_config"].c_str())) {
                 if (!fs::exists(CUSTOM_CONFIG_PATH)) {
                     if (ImGui::MenuItem(lang.main["create"].c_str(), nullptr, &gui.configuration_menu.custom_settings_dialog))
@@ -447,6 +736,8 @@ void draw_app_context_menu(GuiState &gui, EmuEnvState &emuenv, const std::string
                 }
                 ImGui::EndMenu();
             }
+
+#ifndef ANDROID
             if (ImGui::BeginMenu(lang.main["open_folder"].c_str())) {
                 if (ImGui::MenuItem(app_str["title"].c_str()))
                     open_path(APP_PATH.string());
@@ -466,6 +757,8 @@ void draw_app_context_menu(GuiState &gui, EmuEnvState &emuenv, const std::string
                     open_path(IMPORT_TEXTURES_PATH.string());
                 ImGui::EndMenu();
             }
+#endif
+
             if (!emuenv.cfg.show_live_area_screen && ImGui::BeginMenu("Live Area")) {
                 if (ImGui::MenuItem("Live Area", nullptr, &gui.vita_area.live_area_screen))
                     open_live_area(gui, emuenv, app_path);
