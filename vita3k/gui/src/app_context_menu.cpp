@@ -118,6 +118,7 @@ static bool png_to_ico(const fs::path &png, const fs::path &ico) {
 }
 #elif defined(__APPLE__)
 #include <mach-o/dyld.h>
+#include <gui/macos_helper.h>
 #elif defined(ANDROID)
 #include <jni.h>
 #endif
@@ -168,15 +169,19 @@ static fs::path get_exe_path() {
 
 namespace gui {
 
-static void create_app_icon(const fs::path &app_root) {
+static void create_app_icon(EmuEnvState &emuenv, const fs::path &app_root) {
     const std::string title_id = app_root.stem().string();
     const fs::path png = app_root / "sce_sys" / "icon0.png";
 
     if (!fs::exists(png))
         return; // skip, will use exe icon
 
-    const auto exe_dir = get_exe_path().parent_path();
-    const fs::path icon_dir = exe_dir / "cache" / "icons";
+#ifndef __APPLE__
+    const auto base_dir = get_exe_path().parent_path();
+#else
+    const auto base_dir = emuenv.base_path;
+#endif
+    const fs::path icon_dir = base_dir / "cache" / "icons";
     fs::create_directories(icon_dir);
 
 #ifdef _WIN32
@@ -185,11 +190,14 @@ static void create_app_icon(const fs::path &app_root) {
 #elif defined(__linux__)
     const fs::path png_dest = icon_dir / (title_id + ".png");
     if (!fs::copy_file(png, png_dest, fs::copy_options::overwrite_existing))
+#elif defined(__APPLE__)
+    const fs::path icns = icon_dir / (title_id + ".icns");
+    if (!png_to_icns(png, icns))
 #endif
         LOG_ERROR("Failed to create icon for app '{}", title_id);
 }
 
-static void create_shortcut(const std::string &app_path, const std::string &app_name) {
+static void create_shortcut(EmuEnvState &emuenv, const std::string &app_path, const std::string &app_name) {
     const fs::path exe_path = get_exe_path();
     const fs::path exe_dir = exe_path.parent_path();
     const fs::path icons_dir = exe_dir / "cache" / "icons";
@@ -261,7 +269,47 @@ static void create_shortcut(const std::string &app_path, const std::string &app_
     if (hr != S_FALSE)
         CoUninitialize();
 #elif defined(__APPLE__)
-    // TODO: macOS shortcut creation
+    const auto desktop = get_desktop_path();
+
+    if (desktop.empty()) {
+        LOG_ERROR("Failed to retrive desktop path");
+        return;
+    }
+    
+    fs::path app_bundle = desktop / (app_name + ".app");
+    fs::path contents_dir = app_bundle / "Contents";
+    fs::path macos_dir = contents_dir / "MacOS";
+    fs::path resources_dir = contents_dir / "Resources";
+  
+    // Check whether shortcut is already exist and remove exisitng one
+    if (fs::exists(app_bundle)) {
+        fs::remove_all(app_bundle);
+    }
+    
+    // Create necessary directories
+    fs::create_directories(macos_dir);
+    fs::create_directories(resources_dir);
+  
+    // Create launcher script
+    if(!create_launcher(get_exe_path(), macos_dir, app_path)) {
+        LOG_ERROR("Failed to create launcher script");
+        return;
+    }
+  
+    // Create info.plist
+    if(!create_info_plist(contents_dir, app_name, app_path)) {
+        LOG_ERROR("Failed to create info.plist");
+        return;
+    }
+
+    // Copy icns
+    fs::path icns_src = emuenv.base_path / "cache/icons" / (app_path + ".icns");
+    if (fs::exists(icns_src))
+        fs::copy_file(icns_src, resources_dir / "icon.icns", fs::copy_options::overwrite_existing);
+    else
+        fs::copy_file(emuenv.base_path / "Vita3K.icns", resources_dir / "icon.icns", fs::copy_options::overwrite_existing);
+
+    LOG_INFO("macOS app bundle shortcut created successfully at '{}'", app_bundle.string());
 #elif defined(__linux__)
     // Linux: create a .desktop file on desktop
     const fs::path desktop = fs::path(getenv("HOME")) / "Desktop";
@@ -715,14 +763,10 @@ void draw_app_context_menu(GuiState &gui, EmuEnvState &emuenv, const std::string
                 ImGui::EndMenu();
             }
             if (ImGui::MenuItem("Create Shortcut")) {
-#if defined(_WIN32) || defined(__linux__)
                 const auto app_root_path = emuenv.pref_path / "ux0/app" / app_path;
-                create_app_icon(app_root_path);
-#endif
+                create_app_icon(emuenv, app_root_path);
 
-#ifndef __APPLE__
-                create_shortcut(app_path, string_utils::remove_special_chars(APP_INDEX->title));
-#endif
+                create_shortcut(emuenv, app_path, string_utils::remove_special_chars(APP_INDEX->title));
             }
             if (ImGui::BeginMenu(lang.main["custom_config"].c_str())) {
                 if (!fs::exists(CUSTOM_CONFIG_PATH)) {
